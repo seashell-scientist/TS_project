@@ -1,0 +1,1090 @@
+---
+title: "Time Series Project: Spring 2020"
+output: html_notebook
+---
+
+## 1 Dataset: [NOAA sea level rise from 1992-2019](https://www.climate.gov/maps-data/dataset/global-mean-sea-level-graph)
+```{r}
+library(tswge)
+library(ggplot2)
+library(lubridate)
+library(knitr)
+library(orcutt)
+library(dplyr)
+library(kableExtra)
+library(corrplot)
+
+library(tictoc)
+library(imputeTS)
+
+library(nnfor)
+library(forecast)
+library(vars)
+
+#a e s t h e t i c
+library(extrafont)
+#library(vapoRwave) #thematic mismatch
+
+sea = read.csv("D:/SMU/DS 6373 Time Series/NASA_sea_level_1993-2019.csv")
+
+names(sea) <- c('altimeter', 'ID', 'date', 'obs', 'w_obs', 'GMSL.variation', 'GMSL.sd', 'GMSL.smoothed', 'GMSL.variation.GIA', 'GMSL.sd.GIA', 'GMSL.variation.GIA.smoothed', 'GMSL.variation.GIA.smoothed.no_yearly')
+```
+
+## 2 Response variable: Global Mean Sea Level with Global Isostatic Adjustment applied
+This dataset contains global mean sea level averaged from satillite radar altimeters and land based tide gauges. The global isostatic adjustment is an offset to compensate for the elevation changing movement in the earth's crust over time. If this isostatic movement occurs beneath an ocean, it can raise or lower sea levels in a measurable way. The timeframe for such movements is very long however, and something that should be isolated from other possible factors in sea level rise that are more volatile.  
+
+## 3 Client motivations for time series analysis
+Potential clients for this type of data analysis could by anyone who intends to operate near an ocean long term. Companies involved in beachside tourist industries, like hotels or golf courses can use projected sea level rise as an element of cost benefit analysis when planning new installations. Wildlife conservatories overseeing areas like estuaries or costal waterways can use models of sea level rise to help determine what kind of conservations efforts can be taken. City planners and municipal authorities of coastal cities may find use for this data when considering infrastructure and budgeting affected by saltwater intrusions into freshwater aquifiers that supply thier cities. (add more later? more concrete examples)
+
+
+Nasa sea level data from 1993 to 2019 has roughly 36 entries per year, so tri monthly entries
+variables are 
+altimeter type - 0 = dual frequency, 999 = single frequency
+date, # of observations, # of weighted observations, and 7 types of sea level change measurement - 
+1 - Global Mean Sea Level (GMSL) variation with respect to 20year mean, (Global Isostatic Adjustment* not applied)
+2 - GMSL standard deviation (no GIA)
+3 - GMSL 60 day gaussian smoothing filter (no GIA)
+4 - GMSL (with GIA)
+5 - GMSL standard deviation (with GIA)
+6 - GMSL w/gaussian smoothing (60 days) (with GIA)
+7 - GMSL w/gaussian smoothing (60 days) (with GIA) with 'annual and semi-annual signal removed'
+
+* Date 
+
+* mean is derived from entries 121 - 858, which is years 1996-2016
+* an issue, because i wish the actual numbers were given? maybe? post processed numbers are fine too i guess
+```{r}
+s0 = cor(sea)
+corrplot(s0, type = "upper")
+```
+
+
+```{r}
+#sea level initial visualizations
+plotts.wge(sea$GMSL.variation)
+plotts.wge(sea$GMSL.sd)
+plotts.wge(sea$GMSL.variation[1:72])
+plotts.wge(sea$GMSL.variation.GIA)
+plotts.sample.wge(sea$GMSL.variation.GIA)
+```
+```{r}
+plotts.sample.wge(sea$GMSL.variation.GIA)
+pacf(sea$GMSL.variation.GIA)
+```
+very minor spike at .25, maybe 4 seasonality? 
+acf doesn't show much sign of stationarity, slowly damping high autocorrelations may indicate nonstationarity 
+pacf has only 1 ish strong autocorrelations, so estimate for ar 1 or 2 ish? 
+
+#Section A: Univariate analysis
+
+## testing for ARMA/ARIMA/ARUMA/Sig+Noise Fit
+
+```{r}
+#arma testing
+m1.aic = aic5.wge(sea$GMSL.variation.GIA)
+m1.aic
+```
+Hits ARMA(5, 2), but 5 is the max for default, run again with larger margins to see if that's just hitting the cap
+```{r}
+m2.aic = aic5.wge(sea$GMSL.variation.GIA, p = 0:15, q = 0:10)
+m2.aic
+```
+(just test both armas and see how ASE compares)
+
+
+```{r}
+m1 = est.arma.wge(sea$GMSL.variation.GIA, p = 5, q = 2)
+m1$phi
+m1$theta
+
+f1 = fore.arma.wge(sea$GMSL.variation.GIA[1:(length(sea$GMSL.variation.GIA)-36)], phi = m1$phi, theta = m1$theta, n.ahead = 36)
+#36 entries per year, predict sea level variation 1 year at current rate
+
+ase1 = mean((sea$GMSL.variation.GIA[(length(sea$GMSL.variation.GIA)-35):length(sea$GMSL.variation.GIA)] - f1$f)^2)
+paste("average squared error for ARMA(5, 2): ", ase1)
+mean(sea$GMSL.variation.GIA)
+#"(1-1.3076B+0.6804B^2-0.2824B^3-0.0912B^4+0.1021B^5)(Xt-6.24) = (1-0.695B+0.302B^2)*at"
+```
+```{r}
+#m1 5 year forecast
+f1.2 = fore.arma.wge(sea$GMSL.variation.GIA[1:(length(sea$GMSL.variation.GIA))], phi = m1$phi, theta = m1$theta, n.ahead = 720)
+#36 entries per year, predict sea level variation 1 year at current rate
+```
+
+
+```{r}
+m2 = est.arma.wge(sea$GMSL.variation.GIA, p = 10, q = 1)
+m2$phi
+m2$theta
+
+f2 = fore.arma.wge(sea$GMSL.variation.GIA[1:(length(sea$GMSL.variation.GIA)-15)], phi = m2$phi, theta = m2$theta, n.ahead = 36)
+
+ase2 = mean((sea$GMSL.variation.GIA[(length(sea$GMSL.variation.GIA)-19):length(sea$GMSL.variation.GIA)] - f2$f)^2)
+paste("average squared error for ARMA(10, 1): ", ase2)
+#(1-1.6147B+0.5261B^2-0.0574B^3-0.0199B^4+0.1776B^5+0.0142B^6+0.074B^7-0.1675B^8+0.1675B^9-0.1061B^10)(Xt-6.24) = (1-0.9299B)*at
+```
+
+
+
+
+ASE for arma(10, 1) does end up lower. 
+```{r}
+#5 year m2 forecast
+f2.2 = fore.arma.wge(sea$GMSL.variation.GIA[1:(length(sea$GMSL.variation.GIA))], phi = m2$phi, theta = m2$theta, n.ahead = 720)
+```
+
+test rolling window ase below
+```{r}
+#rolling window ase thing test
+trainingSize = 70
+horizon = 36 
+ASEHolder = numeric()
+phis = m1$phi
+thetas = m1$theta
+s = 0
+d = 0
+
+for( i in 1:(159-(trainingSize + horizon) + 1))
+{
+  
+  forecasts = fore.aruma.wge(sea$GMSL.variation.GIA[i:(i+(trainingSize-1))],phi = phis, theta = thetas, s = s, d = d,n.ahead = horizon)
+  
+  ASE = mean((sea$GMSL.variation.GIA[(trainingSize+i):(trainingSize+ i + (horizon) - 1)] - forecasts$f)^2)
+         
+  ASEHolder[i] = ASE
+
+}
+
+ASEHolder
+hist(ASEHolder)
+WindowedASE = mean(ASEHolder)
+
+summary(ASEHolder)
+WindowedASE
+
+# Visualization
+
+i = 78
+fs = fore.aruma.wge(sea$GMSL.variation.GIA[i:(i+(trainingSize+horizon)-1)],phi = phis, theta = thetas, s = s, d = d,n.ahead = 12, lastn = TRUE)
+ASE = mean((sea$GMSL.variation.GIA[(i+trainingSize):(i+(trainingSize+horizon)-1)] - fs$f )^2)
+roll.ase1 = ASE
+ASE
+```
+
+```{r}
+#rolling window ase thing test
+trainingSize = 70
+horizon = 36
+ASEHolder = numeric()
+phis = m2$phi
+thetas = m2$theta
+s = 0
+d = 0
+
+for( i in 1:(159-(trainingSize + horizon) + 1))
+{
+  
+  forecasts = fore.aruma.wge(sea$GMSL.variation.GIA[i:(i+(trainingSize-1))],phi = phis, theta = thetas, s = s, d = d,n.ahead = horizon)
+  
+  ASE = mean((sea$GMSL.variation.GIA[(trainingSize+i):(trainingSize+ i + (horizon) - 1)] - forecasts$f)^2)
+         
+  ASEHolder[i] = ASE
+
+}
+
+ASEHolder
+hist(ASEHolder)
+WindowedASE = mean(ASEHolder)
+
+summary(ASEHolder)
+WindowedASE
+
+# Visualization
+
+i = 78
+fs = fore.aruma.wge(sea$GMSL.variation.GIA[i:(i+(trainingSize+horizon)-1)],phi = phis, theta = thetas, s = s, d = d,n.ahead = 12, lastn = TRUE)
+ASE = mean((sea$GMSL.variation.GIA[(i+trainingSize):(i+(trainingSize+horizon)-1)] - fs$f )^2)
+roll.ase2 = ASE
+ASE
+```
+
+
+##seasonal model
+
+```{r}
+#seasonal model testing
+sample.s36 = gen.aruma.wge(n = 432, s = 18, sn = 1342)
+est.ar.wge(sample.s36, p = 36, type = "burg") #guessing s = 36??
+
+```
+
+```{r}
+est.ar.wge(sea$GMSL.variation.GIA, p = 30, type = "burg")
+
+```
+some matches, just go with s = 18 for now
+```{r}
+#transform data
+y = artrans.wge(sea$GMSL.variation.GIA, phi.tr = c(rep(0,17), 1))
+```
+s = 36 not really stationary, s = 18 maybe though?? 
+```{r}
+plotts.sample.wge(y)
+
+```
+transformed data looks to have 9 ish frequencies? 
+
+
+```{r}
+aic5.wge(y, p = 0:12, q = 0:6)
+```
+AIC is lowest for 10, 4, but going with 9 2, to make an arima(9, 18, 2)
+
+```{r}
+m3 = est.arma.wge(sea$GMSL.variation.GIA, p = 9, q = 2)
+m3$phi
+m3$theta
+
+f3 = fore.aruma.wge(sea$GMSL.variation.GIA[952:988], phi = m3$phi, theta = m3$theta, d = 0, s = 18, n.ahead = 36)
+#36 entries per year, predict sea level variation 1 year at current rate
+
+#ase3 = mean((sea$GMSL.variation.GIA[(length(sea$GMSL.variation.GIA)-35):length(sea$GMSL.variation.GIA)] - f3$f)^2)
+ase3 = mean((sea$GMSL.variation.GIA[952:988]-f3$f)^2)
+paste("average squared error for ARUMA(9, 18, 2): ", ase3)
+mean(sea$GMSL.variation.GIA)
+#(1+0.97131823B  -0.39644095B^2  -0.99482457B^3  -0.51328710B^4 -0.36371220B^5  -0.03509629B^6 +0.18712053B^7 +0.11120737B^8 +0.04004108B^9)(1-B^18) = (1+1.6969149B + 0.9308516B^2)*at, var= 6.983474
+```
+
+model 3  = (1+0.97131823B  -0.39644095B^2  -0.99482457B^3  -0.51328710B^4 -0.36371220B^5  -0.03509629B^6 +0.18712053B^7 +0.11120737B^8 +0.04004108B^9)(1-B^18) = (1+1.6969149B + 0.9308516B^2)*at, var = 6.983474
+
+```{r}
+f3.2 = fore.aruma.wge(sea$GMSL.variation.GIA[1:(length(sea$GMSL.variation.GIA))], phi = m3$phi, theta = m3$theta, s = 18, n.ahead = 720, limits = FALSE)
+```
+
+```{r}
+#rolling window ase for model 3
+trainingSize = 70
+horizon = 36
+ASEHolder = numeric()
+phis = m3$phi
+thetas = m3$theta
+s = 18
+d = 0
+
+for( i in 1:(159-(trainingSize + horizon) + 1))
+{
+  
+  forecasts = fore.aruma.wge(sea$GMSL.variation.GIA[i:(i+(trainingSize-1))],phi = phis, theta = thetas, s = s, d = d,n.ahead = horizon)
+  
+  ASE = mean((sea$GMSL.variation.GIA[(trainingSize+i):(trainingSize+ i + (horizon) - 1)] - forecasts$f)^2)
+         
+  ASEHolder[i] = ASE
+
+}
+
+ASEHolder
+hist(ASEHolder)
+WindowedASE = mean(ASEHolder)
+
+summary(ASEHolder)
+WindowedASE
+
+# Visualization
+
+i = 78
+fs = fore.aruma.wge(sea$GMSL.variation.GIA[i:(i+(trainingSize+horizon)-1)],phi = phis, theta = thetas, s = s, d = d,n.ahead = 12, lastn = TRUE)
+ASE = mean((sea$GMSL.variation.GIA[(i+trainingSize):(i+(trainingSize+horizon)-1)] - fs$f )^2)
+roll.ase3 = ASE
+ASE
+```
+
+## stationarity testing
+Initial visualization looks pretty wander-y, check to see if roots are within unit circle
+```{r}
+#factor.wge(sea$GMSL.variation.GIA)
+```
+
+
+```{r}
+#sig plus noise section
+x = sea$GMSL.variation.GIA
+t = seq(1, length(x), 1)
+df = data.frame(x = x, t = t)
+fit = lm(x~t, data = df)
+#again, note that summary of fit will usually give very different results from summary of cfit
+cfit = cochrane.orcutt(fit) #cfit is better, less false positives
+print("hypothesis testing for linear trend regression")
+summary(fit)
+print("hypothesis testing for corchrane orcutt trend analysis")
+summary(cfit)
+```
+pvalue for slope is  = <2e-16, reject H0; 95% confident that residuals are not white noise? 
+
+```{r}
+#take first difference to check for white noise
+d1 = artrans.wge(sea$GMSL.variation.GIA, phi.tr = 1)
+```
+yep, first difference sure does look like white noise, with an acf that is within the error margins and semi-symmetric transformed visualization. Indicates that the base data set doesn't contain much noise?
+
+
+
+
+
+##Rest of the analysis
+ - VAR with explanatory variable
+ - Neural Network
+ - Ensamble model
+ 
+ 6. forecast horizon (multiples of 36 points for years)
+ 7. ppt and 7 min video
+ 8. post ppt and video to google doc and 2ds
+
+
+### Additional Data for VAR
+
+merge - 
+global energy consumption - annual
+global population growth - annual
+to get average energy consumption per capita, annual
+
+sea level range - 1993:2019
+energy ts range - 1980:2008
+population data range - 1960:2019
+overlap range - 1993:2008
+pair with global energy consumption to get average global energy consumption per capita
+
+hmmm condensing GMSL to annual might leave too few datapoints.. .imputate annual measures maybe?
+
+```{r}
+nat_eng = read.csv("D:/SMU/DS 6373 Time Series/totalprimaryenergyconsumptionquadrillionbtu.csv")
+#https://www.eia.gov/totalenergy/data/annual/showtext.php?t=ptb0103
+nat_eng = data.frame(nat_eng, stringsAsFactors = FALSE)
+et = as.data.frame(t(nat_eng)) #transpose
+cnames = unlist(et[1, ], use.names = FALSE) #take first row of country names as list
+colnames(et) <- cnames #pass to column names
+et <- et[-1, ] #drop the first row
+```
+
+```{r}
+#add countries into global total/average energy consumption by year
+countries = seq(1, ncol(et), 1)
+years = seq(1, nrow(et), 1)
+ye = vector() 
+for (j in years)
+{
+  temp_erg = vector() #stores total energy per year
+  counter = 0 #for mean calculation
+  for (i in countries)
+  {
+    if(et[1, i] != '--') #exclude countries that don't have energy data in the sum with values --
+    {
+      temp_erg <- append(temp_erg, et[j, i])
+      #print(et[1, i])
+      counter = counter + 1
+    }
+  }
+  ye <- append(ye, sum(temp_erg)) #global energy consumption per year
+}
+yearly_erg <- ts(ye, start = 1980, frequency = 1) #annual ts of global energy consumption in 10^15 BTU
+
+yearly_erg_limited = ye[14:29] #range 1993:2008
+#library(imputeTS)
+#create vector that spaces out each annual sum with 35 spaces inbetween
+trimonthly_imputation = vector()
+years = seq(1, 16, 1)
+for(q in years)
+{
+  trimonthly_imputation <- append(trimonthly_imputation, yearly_erg_limited[q])
+  trimonthly_imputation <- append(trimonthly_imputation, rep(NA, 35))
+}
+tse = ts(trimonthly_imputation, start = 1993, frequency = 36)
+
+#now impute the na
+imputed_erg1 = na_interpolation(tse, option = 'linear')
+imputed_erg1.2 = na_interpolation(tse, option = 'spline')
+imputed_erg1.3 = na_interpolation(tse, option = 'stine')
+imputed_erg2 = na_kalman(tse)
+imputed_erg3 = na_locf(tse)
+imputed_erg4 = na_ma(tse)
+imputed_erg5 = na_mean(tse)
+imputed_erg6 = na_random(tse)
+imputed_erg7 = na_replace(tse)
+imputed_erg8 = na_seadec(tse)
+
+```
+Energy consumption in quadrillion (10^15) BTU (British thermal units) from 1980 to 2008, recorded annually. 
+Note, many smaller countries have energy consumption partially listed as NA, which has been reformatted to zero for simplicity, but is obviously inacurrate. Annual data doesn't quite match up to the recorded sea level data, so we'll impute 36 entries per year as a start
+
+```{r}
+#par(mfrow = c(1, 2))
+plot(yearly_erg, main = 'Annual energy, 10^15 BTU, 1980:2019')
+plot(imputed_erg1, main = 'linear interpolation, 1993:2008')
+plot(imputed_erg1.2, main = 'spline interpolation')
+plot(imputed_erg1.3, main = 'stine interpolation')
+plot(imputed_erg2, main = 'kalman smoothing')
+plot(imputed_erg3, main =  'last observation carried forward')
+plot(imputed_erg4, main = 'weighted moving average')
+plot(imputed_erg5, main = 'mean value')
+plot(imputed_erg6, main = 'random imputation')
+plot(imputed_erg7, main = 'remove missing values')
+plot(imputed_erg8, main = 'seasonally decomposed missing value imputation')
+```
+Not much of a pattern here; interpolated data lacks details. nearly linear except for a dip likely representing the 1993 global recession, but this is only 29 years of data. 
+
+
+```{r}
+#get global population data from https://data.worldbank.org/indicator/sp.pop.totl
+pop = read.csv("D:/SMU/DS 6373 Time Series/API_SP.POP.TOTL_DS2_en_csv_v2_887275.csv")
+```
+contains population by country per year from 1960 to 2018 from worldbank, will use global population total 
+
+```{r}
+tpop = as.data.frame(t(pop)) #transpose
+gpop = tpop$V258 #world population column
+
+global_pop = as.data.frame(gpop[5:(length(gpop)-1)], stringsAsFactors = FALSE)
+global_pop = ts(as.numeric(as.character(global_pop[, 1])), start = 1960, frequency = 1)
+#plot(global_pop)
+global_pop_limited = global_pop[34:49]
+
+#impute
+trimonthly_imputation = vector()
+#years = seq(1, length(global_pop$`gpop[5:(length(gpop) - 1)]`), 1)
+year = seq(1, 16, 1) #limited overlap range for multivariate merge
+for(q in year)
+{
+  trimonthly_imputation <- append(trimonthly_imputation, as.numeric(as.character(global_pop_limited[q])))
+  #print(as.numeric(as.character(global_pop_limited[q])))
+  trimonthly_imputation <- append(trimonthly_imputation, rep(NA, 35))
+}
+
+gpi = ts(trimonthly_imputation, start = 1993, frequency = 36) #empty ts for imputation
+```
+
+```{r}
+#reg data
+#plot(global_pop, main = "Global Population 1993:2018 ")
+brazil_pop <- as.numeric(as.character(tpop$V28[5:63]))
+usa_pop <- as.numeric(as.character(tpop$V250[5:63]))
+china_pop <- as.numeric(as.character(tpop$V39[5:63]))
+ethiopia_pop <- as.numeric(as.character(tpop$V71[5:63]))
+germany_pop <- as.numeric(as.character(tpop$V54[5:63]))
+india_pop <- as.numeric(as.character(tpop$V108[5:63]))
+mexico_pop <- as.numeric(as.character(tpop$V153[5:63]))
+
+gr_pop <- cbind(global_pop, brazil_pop, usa_pop, china_pop, india_pop, germany_pop, mexico_pop, ethiopia_pop)
+ggplot() + 
+  geom_line(data = gr_pop[, 1], aes(x = seq(1960, 2018, 1), y = global_pop, color = "Global"))+
+  geom_line(data = gr_pop[, 2], aes(x = seq(1960, 2018, 1), y = brazil_pop, color = "Brazil"))+
+  geom_line(data = gr_pop[, 3], aes(x = seq(1960, 2018, 1), y = usa_pop, color = "USA"))+
+  geom_line(data = gr_pop[, 4], aes(x = seq(1960, 2018, 1), y = china_pop, color = "China"))+
+  geom_line(data = gr_pop[, 5], aes(x = seq(1960, 2018, 1), y = ethiopia_pop, color = "Ethiopia"))+
+  geom_line(data = gr_pop[, 6], aes(x = seq(1960, 2018, 1), y = germany_pop, color = "Germany"))+
+  geom_line(data = gr_pop[, 7], aes(x = seq(1960, 2018, 1), y = mexico_pop, color = "Mexico"))+
+  ggtitle("Global Population 1960:2018")+
+  xlab("Year")+
+  ylab("Population")
+```
+```{r}
+#imputation options
+global_pop_imputed1 = as.ts(na_interpolation(gpi, option = 'linear'), start = 1993, frequency = 36)
+plot(global_pop_imputed1)
+
+global_pop_imputed2 = as.ts(na_interpolation(gpi, option = 'spline'), start = 1993, frequency = 36)
+plot(global_pop_imputed2)
+
+global_pop_imputed3 = as.ts(na_interpolation(gpi, option = 'stine'), start = 1993, frequency = 36)
+plot(global_pop_imputed3)
+     
+global_pop_imputed4 = as.ts(na_kalman(gpi), start = 1993, frequency = 36)
+plot(global_pop_imputed4)
+
+global_pop_imputed5 = as.ts(na_seadec(gpi), start = 1993, frequency = 36)
+plot(global_pop_imputed5)
+
+global_pop_imputed6 = as.ts(na_locf(gpi), start = 1993, frequency = 36)
+plot(global_pop_imputed6)
+```
+global population is nearly linear, hmmm questionable value but oh well
+
+###ice area??? 
+Yearly Area of Polar Ice Caps (in 10^6 km^2) from [National Snow and Ice Data Center](https://nsidc.org/arcticseaicenews/sea-ice-tools/), 1981-2010
+
+```{r}
+ice0 <- read.csv("D:/SMU/DS 6373 Time Series/N_seaice_extent_climatology_1981-2010_v3.0.csv")
+#https://nsidc.org/arcticseaicenews/sea-ice-tools/
+```
+
+```{r}
+ice <- ts(ice0$Average.Extent, start = 1981, frequency =  12)
+plotts.sample.wge(ice)
+plot(ice)
+```
+
+```{r}
+ice_monthly_trim <- ice[144:336]
+trimonthly_imputation= vector()
+year = seq(1, (length(ice_monthly_trim)-1), 1)
+for(q in year)
+{
+  trimonthly_imputation <- append(trimonthly_imputation, ice_monthly_trim[q])
+  #print(epc[q])
+  trimonthly_imputation <- append(trimonthly_imputation, rep(NA, 2))
+}
+
+lim_ice = ts(trimonthly_imputation, start = 1993, frequency = 36)
+lim_ice = as.ts(na_interpolation(lim_ice, option = 'linear'), start = 1993, frequency = 36)
+plot(lim_ice)
+
+```
+
+
+
+```{r}
+#multivariate ts annual
+pop_a = as.numeric(as.character(global_pop[34:49]))
+erg_a = as.numeric(as.character(ye[14:29]))
+epc = ((erg_a/pop_a)*10^15)
+epc #as mean BTU consumed per capita, from 1993:2008
+
+trimonthly_imputation = vector()
+year = seq(1, 16, 1) #limited overlap range for multivariate merge
+for(q in year)
+{
+  trimonthly_imputation <- append(trimonthly_imputation, epc[q])
+  #print(epc[q])
+  trimonthly_imputation <- append(trimonthly_imputation, rep(NA, 35))
+}
+
+ergi = ts(trimonthly_imputation, start = 1993, frequency = 36)
+
+#global mean energy per capita, imputed
+gmepci = as.ts(na_interpolation(ergi, option = 'stine'), start = 1993, frequency = 36)
+plot(gmepci)
+```
+#### context
+1 KwH = 3412.14 BTU
+1 KwH would power an 800 watt microwave for 1.25 hrs, or 75 minutes. 
+Average yearly BTU per person in 1993 = 370500857 BTU /3412.14 BTU/KwH = 108583.0555 KwH *1.25= 135728.8194 hours of 800W microwave use /24/365= running 15.49 800W microwaves 24/7 all year in 1993. 
+```{r}
+conversion_rate =(((epc/3412.14)*1.25)/24/365)
+microwaves_per_year <- ts(conversion_rate, start = 1993, frequency = 1)
+vm <- ggplot(data = microwaves_per_year, aes(x = seq(1993, 2008, 1), y = as.data.frame(microwaves_per_year)$x)) + 
+  geom_line()+
+  geom_point()
+vm + labs(title = "Per Capita Annual Energy Usage in Microwaves*", subtitle = "*very approximate", x = "Year", y = "800W Microwaves Running 24/7") 
+  
+```
+by 2008, the theoretical average person is running the equivalent of 27 800W microwaves all year
+
+```{r}
+#multivariate ts imputed
+lim_sea = sea$GMSL.variation.GIA[1:576]
+lim_erg = imputed_erg1
+lim_pop = global_pop_imputed3
+lim_epp = gmepci #erg per pop
+#lim_ice #10^6 km^2 of polar ice 
+#oops looks like sea data isn't exactly 36 per year, some error can be attributed to skew between the actual dates of the sea level measurements and the imputed data on the rest of the variables
+#....maybe... 
+#create dummy vars in the sea data for round yearly to match erg and pop
+#get spacing on the sea data to match pattern in erg/pop
+#impute the years on the sea data
+#impute everything but years on pop/erg data
+#????
+#... get time matched datasets?
+```
+now that we have all the parts for additional data to use as variables... hopefully
+
+#Section B: VAR model
+
+```{r}
+library(vars)
+
+mv1 <- cbind(lim_sea, lim_erg, lim_pop, lim_epp, lim_ice)
+
+acf(mv1)
+pacf(mv1[, 1])
+pacf(mv1[, 2])
+pacf(mv1[, 3])
+pacf(mv1[, 4])
+pacf(mv1[, 5])
+```
+Overlapping data limitations make the sample sizes for supplementary variables population and energy consumption so small, that no identifiable pattern emerges.
+
+```{r}
+ggplot() + 
+  geom_line(data = mv1[, 1], aes(x = seq(1993, 2008.99, (1/36)), 
+                                 y = ((lim_sea - mean(lim_sea))/sd(lim_sea)), 
+                                 color = 'Sea level')) + 
+  geom_line(data = mv1[, 2], aes(x = seq(1993, 2008.99, (1/36)), 
+                                 y = ((lim_erg - mean(lim_erg))/sd(lim_erg)), 
+                                 color = 'Energy Consumption')) + 
+  geom_line(data = mv1[, 3], aes(x = seq(1993, 2008.99, (1/36)), 
+                                 y = ((lim_pop - mean(lim_pop))/sd(lim_pop)), 
+                                 color = 'Global Population')) + 
+  geom_line(data = mv1[, 4], aes(x = seq(1993, 2008.99, (1/36)), 
+                                 y = ((lim_epp - mean(lim_epp))/sd(lim_epp)), 
+                                      color = 'Microwaves Per Person')) + 
+  geom_line(data = mv1[, 5], aes(x = seq(1993, 2008.99, (1/36)),
+                                 y = ((lim_ice - mean(lim_ice))/sd(lim_ice)), 
+                                 color = 'Ice Area')) + 
+  scale_linetype_manual(values = mv1)+
+  ggtitle("Normalized Multivariate Data: 1993 to 2009") +
+  xlab("Year")+
+  ylab("Normalized Values")
+```
+mostly positive correlations, low sample "window" (1993:2008) greatly limits ability to see long term trends
+
+```{r}
+ggv <- ggplot() +
+  geom_line(data = sea, aes(x = sea$date, y = sea$GMSL.variation.GIA), col = "steelblue")+
+  geom_line(data = ice0, aes(x = decimal_date(seq.Date(as.Date("1981-01-01"), length.out = 366, by = "month")), y = ice0$Average.Extent), col = "lightblue") +
+  geom_line(data = data.frame(global_pop[20:59]), aes(x = decimal_date(seq.Date(as.Date("1960-01-01"), length.out = 59, by = "year"))[20:59], y = as.numeric(global_pop[20:59])/100000000), col = "purple") +
+  geom_line(data = yearly_erg, aes(x = decimal_date(seq.Date(as.Date("1980-01-01"), length.out = 29, by = "year")), y = (yearly_erg/100)), col = "orange")+
+  geom_line(data = microwaves_per_year, aes(x = decimal_date(seq.Date(as.Date("1993-01-01"), length.out = 16, by = "year")), y = microwaves_per_year), color = "darkred") +
+  annotate("rect", xmin=1993, xmax=2008, ymin=-Inf, ymax=Inf, alpha=0.1, fill="salmon1")+
+  annotate("text", x = 1993, y = -12, label = "1993")+
+  annotate("text", x = 2008, y = -12, label = "2008")+
+  ggtitle("Common Data Range") +
+  xlab("Year") +
+  ylab("Not to scale")
+
+
+ggv
+```
+Disparate time scales/length of datasets makes direct comparison tenuous at best. 
+
+```{r}
+v1 <- VARselect(data.frame(sea$date[1:576], lim_sea),  lag.max = 10, type = "trend", season = 36)
+v1
+v1_aic <- v1$criteria[1, 3]
+
+#var1, sea data only
+VAR1 <- VAR(data.frame(sea$date[1:576], lim_sea), p = 3, type = "trend", season = 36)
+pred1 <- predict(VAR1, n.ahead = 36)
+
+plot( x = sea$date[577:612], y = sea$GMSL.variation.GIA[577:612], type = "l", main = "VAR 1, sea data only", xlab = "Years", ylab = "sea variation") #actual data 
+lines(x =  sea$date[577:612], y = pred1$fcst$lim_sea[,1],col = "red")
+
+ASE = mean((sea$GMSL.variation.GIA[577:612] - pred1$fcst$lim_sea[1:36])^2)
+ASE
+var_ase1 = ASE
+```
+
+```{r}
+v2 <- VARselect(data.frame(sea$date[1:576], lim_sea, lim_erg),  lag.max = 10, type = "trend", season = 36)
+v2
+v2_aic <- v2$criteria[1, 7]
+
+#var2, 2vars
+VAR2 <- VAR(data.frame(sea$date[1:576], lim_sea, lim_erg), p = 7, type = "trend", season = 36)
+pred2 <- predict(VAR2, n.ahead = 36)
+
+plot( x = sea$date[577:612], y = sea$GMSL.variation.GIA[577:612], type = "l", main = "VAR 2, sea data + energy consumption", xlab = "Years", ylab = "sea variation") #actual data 
+lines(x =  sea$date[577:612], y = pred2$fcst$lim_sea[,1],col = "red")
+
+ASE = mean((sea$GMSL.variation.GIA[577:612] - pred2$fcst$lim_sea[1:36])^2)
+ASE
+var_ase2 = ASE
+```
+
+```{r}
+df_2var <- data.frame(sea$date[1:576], lim_sea, lim_ice)
+v <- VARselect(df_2var,  lag.max = 10, type = "trend", season = 36)
+v
+v2.1_aic <- v$criteria[1, 8]
+
+#var2, 2vars
+VAR2.1 <- VAR(df_2var, p = 8, type = "trend", season = 36)
+pred <- predict(VAR2.1, n.ahead = 36)
+
+plot( x = sea$date[577:612], y = sea$GMSL.variation.GIA[577:612], type = "l", main = "VAR 2.1, sea data + ice", xlab = "Years", ylab = "sea variation") #actual data 
+lines(x =  sea$date[577:612], y = pred$fcst$lim_sea[,1],col = "red")
+
+ASE = mean((sea$GMSL.variation.GIA[577:612] - pred$fcst$lim_sea[1:36])^2)
+ASE
+var_ase2.1 = ASE
+```
+```{r}
+df_2var <- data.frame(sea$date[1:576], lim_sea, lim_epp)
+v <- VARselect(df_2var,  lag.max = 10, type = "trend", season = 36)
+v
+v2.2_aic <- v$criteria[1, 5]
+
+#var2, 2vars
+VAR <- VAR(df_2var, p = 5, type = "trend", season = 36)
+pred <- predict(VAR, n.ahead = 36)
+
+plot( x = sea$date[577:612], y = sea$GMSL.variation.GIA[577:612], type = "l", main = "VAR 2.2, sea data + microwaves", xlab = "Years", ylab = "sea variation") #actual data 
+lines(x =  sea$date[577:612], y = pred$fcst$lim_sea[,1],col = "red")
+
+ASE = mean((sea$GMSL.variation.GIA[577:612] - pred$fcst$lim_sea[1:36])^2)
+ASE
+var_ase2.2 = ASE
+```
+
+```{r}
+v3 <- VARselect(data.frame(sea$date[1:576], lim_sea, lim_erg, lim_pop),  lag.max = 10, type = "trend", season = 36)
+v3
+v3_aic <- v3$criteria[1, 2]
+
+#var3, 3vars
+VAR3 <- VAR(data.frame(sea$date[1:576], lim_sea, lim_erg, lim_pop), p = 2, type = "trend", season = 36)
+pred3 <- predict(VAR3, n.ahead = 36)
+
+plot( x = sea$date[577:612], y = sea$GMSL.variation.GIA[577:612], type = "l", main = "VAR 3, sea data + energy + population", xlab = "Years", ylab = "sea variation") #actual data 
+lines(x =  sea$date[577:612], y = pred3$fcst$lim_sea[,1],col = "red")
+
+ASE = mean((sea$GMSL.variation.GIA[577:612] - pred3$fcst$lim_sea[1:36])^2)
+ASE
+var_ase3 = ASE
+```
+
+```{r}
+v4 <- VARselect(data.frame(sea$date[1:576], lim_sea, lim_erg, lim_pop, lim_ice),  lag.max = 10, type = "trend", season = 36)
+v4
+v4_aic <- v4$criteria[1, 8]
+
+#var4, 4vars
+VAR4 <- VAR(data.frame(sea$date[1:576], lim_sea, lim_erg, lim_pop, lim_ice), p = 8, type = "trend", season = 36)
+pred4 <- predict(VAR4, n.ahead = 36)
+
+plot( x = sea$date[577:612], y = sea$GMSL.variation.GIA[577:612], type = "l", main = "VAR 4, sea data + energy + population + ice", xlab = "Years", ylab = "sea variation") #actual data 
+lines(x =  sea$date[577:612], y = pred4$fcst$lim_sea[,1],col = "red")
+
+ASE = mean((sea$GMSL.variation.GIA[577:612] - pred4$fcst$lim_sea[1:36])^2)
+ASE
+var_ase4 = ASE
+```
+
+```{r}
+v5 <- VARselect(data.frame(sea$date[1:576], lim_sea, lim_erg, lim_pop, lim_ice,lim_epp ),  lag.max = 10, type = "trend", season = 36)
+v5
+v5_aic <- v5$criteria[1, 8]
+
+#var5
+VAR5 <- VAR(data.frame(sea$date[1:576], lim_sea, lim_erg, lim_pop, lim_ice, lim_epp), p = 8, type = "trend", season = 36)
+pred5 <- predict(VAR5, n.ahead = 36)
+
+plot( x = sea$date[577:612], y = sea$GMSL.variation.GIA[577:612], type = "l", main = "VAR 5, sea data + energy + population + ice + microwaves", xlab = "Years", ylab = "sea variation") #actual data 
+lines(x =  sea$date[577:612], y = pred5$fcst$lim_sea[,1],col = "red")
+
+ASE = mean((sea$GMSL.variation.GIA[577:612] - pred5$fcst$lim_sea[1:36])^2)
+ASE
+var_ase5 = ASE
+```
+```{r}
+#var 2.1 extended 
+pred = predict(VAR2.1,n.ahead = 108)
+plot( x = sea$date[577:684], y = sea$GMSL.variation.GIA[577:684], type = "l", main = "VAR 5 extended", xlab = "Years", ylab = "sea variation") #actual data 
+lines(x =  sea$date[577:684], y = pred$fcst$lim_sea[,1],col = "red") #predicted var model data
+ASE = mean((sea$GMSL.variation.GIA[577:684] - pred$fcst$lim_sea[1:108])^2)
+ASE
+var_ase2.1e = ASE
+```
+
+```{r}
+#var 5 extended 
+pred = predict(VAR5,n.ahead = 108)
+plot( x = sea$date[577:684], y = sea$GMSL.variation.GIA[577:684], type = "l", main = "VAR 5 extended", xlab = "Years", ylab = "sea variation") #actual data 
+lines(x =  sea$date[577:684], y = pred$fcst$lim_sea[,1],col = "red") #predicted var model data
+ASE = mean((sea$date[577:684] - pred$fcst$lim_sea[1:108])^2)
+ASE
+var_ase5.2 = ASE
+```
+
+
+
+#Section C: Neural Network
+
+```{r}
+df_mv1 <- data.frame(mv1)
+
+#mlp on sea data alone, reserve last 36 entries for endpoint ase
+mlp_fit = mlp(ts(sea$GMSL.variation.GIA[1:952], start = (1993), frequency = 36),reps = 40, comb = "mean") #only takes single ts
+mlp_fore = forecast(mlp_fit, h = 36, bootstrap = TRUE) #forecast 36 ~about 1 year ahead
+plot(mlp_fore)
+```
+```{r}
+ASE = mean((sea$GMSL.variation.GIA[953:988] - mlp_fore$mean)^2)
+paste("ASE for NN on sea data: ", ASE)
+nn_ase1 = ASE
+```
+
+```{r}
+#5 year forecast with all data
+mlp_fit = mlp(ts(sea$GMSL.variation.GIA, start = (1993), frequency = 36),reps = 40, comb = "mean")
+mlp_fore = forecast(mlp_fit, h = 180, bootstrap = TRUE) #forecast 36 ~about 1 year ahead
+plot(mlp_fore)
+
+```
+
+```{r}
+# #test rolling steps
+# i = 1
+# 
+# wstart = ((i-1) * step)  +1
+# small_mlp = mlp(ts(maindata[wstart:(wstart + trainingSize -1)]), reps = 5, comb = "mean")
+# forecasts = forecast(small_mlp, h = 36)
+# ASE = mean((maindata[(wstart + trainingSize):(wstart + trainingSize + horizon-1)] - forecasts$mean)^2)
+# ASEHolder[i] = ASE
+# #ASE
+# loopcount <- paste("Window Range:", sea$date[wstart], ":", sea$date[(wstart + trainingSize + horizon-1)])
+# ggplot()+ #realdata line
+#   geom_line(data = data.frame(maindata[wstart:(wstart + trainingSize + horizon-1)]),
+#             aes(x = sea$date[wstart:(wstart + trainingSize + horizon-1)], 
+#                 y = maindata[wstart:(wstart + trainingSize + horizon-1)])) +
+#   geom_line(data = data.frame(forecasts), #predictions
+#             aes(x = sea$date[(wstart + trainingSize):(wstart + trainingSize + horizon-1)]),
+#             y = forecasts$mean, col = "blue") +
+#   ggtitle("Windowed ASE", subtitle = loopcount) +
+#   xlab("Date Window") +
+#   ylab("Sea Level Variation compared to 1996:2016 mean")
+```
+
+```{r}
+tic()
+#rolling ase for nn1
+#for brevity, take blocks of 72, predict 36, and move  36 to next 72
+trainingSize = 72
+horizon = 36
+step = 36 #how far to advance each ase window
+ASEHolder = numeric()
+maindata = sea$GMSL.variation.GIA
+
+for( i in 1:(floor(length(maindata)/step)-2))
+{
+  wstart = ((i-1) * step)  +1
+  small_mlp = mlp(ts(maindata[wstart:(wstart + trainingSize -1)]), reps = 5, comb = "mean")
+  forecasts = forecast(small_mlp, h = 36)
+  ASE = mean((maindata[(wstart + trainingSize):(wstart + trainingSize + horizon-1)] - forecasts$mean)^2)
+  ASEHolder[i] = ASE
+  
+  #vizualize each loop
+  loopcount <- paste("Window Range:", sea$date[wstart], ":", sea$date[(wstart + trainingSize + horizon-1)])
+  ase_title <- paste("Windowed ASE:", ASE)
+ggloop <- ggplot()+ #realdata line
+  geom_line(data = data.frame(maindata[wstart:(wstart + trainingSize + horizon-1)]),
+            aes(x = sea$date[wstart:(wstart + trainingSize + horizon-1)], 
+                y = maindata[wstart:(wstart + trainingSize + horizon-1)])) +
+  geom_line(data = data.frame(forecasts), #predictions
+            aes(x = sea$date[(wstart + trainingSize):(wstart + trainingSize + horizon-1)]),
+            y = forecasts$mean, col = "blue") +
+  ggtitle(loopcount, subtitle = ase_title) +
+  xlab("Date Window") +
+  ylab("Sea Level Variation compared to 1996:2016 mean")
+
+g_file <- paste("PsudeoRoll_NN_1_", i, ".png", sep = "") #file name to export
+ggsave(path = 'D:/SMU/DS 6373 Time Series', filename = g_file)
+
+print(ggloop)
+  }
+
+ASEHolder
+hist(ASEHolder)
+WindowedASE = mean(ASEHolder)
+summary(ASEHolder)
+WindowedASE
+roll.nn.ase1 = WindowedASE
+toc()
+
+#hmm this is more of a psudeo rolling ase, not sure how to forecast multiple intervals from the same mlp object without altering the base data fed into the mlp
+```
+
+```{r}
+
+#mlp on sea data limited window
+mlp_fit = mlp(ts(lim_sea, start = (1993), frequency = 36),reps = 36, comb = "mean")
+mlp_fore = forecast(mlp_fit, h = 36, bootstrap = TRUE)
+plot(mlp_fore)
+```
+
+```{r}
+ASE = mean((sea$GMSL.variation.GIA[577:612] - mlp_fore$mean)^2)
+paste("ASE for NN on sea data limited: ", ASE)
+```
+
+```{r}
+#nn2
+#with xreg: pop, erg, epp, and ice
+fit.mlp = mlp(ts(lim_sea, start = (1993), frequency = 36), reps = 36,comb = "mean",df_mv1[2:5]) 
+fit.mlp
+plot(fit.mlp)
+mlp_fore = forecast(fit.mlp, h = 36, bootstrap = TRUE)
+mlp2_pred <- mlp_fore$mean
+ASE = mean((sea$GMSL.variation.GIA[577:612] - mlp_fore$mean)^2)
+paste("ASE for NN2 with XREG: ", ASE)
+nn_ase2 <- ASE
+```
+```{r}
+gn2 <- ggplot() +
+  geom_line(data = data.frame(sea$GMSL.variation.GIA[1:576]), aes(x = sea$date[1:576], y = sea$GMSL.variation.GIA[1:576]))+
+  geom_line(data = mlp_fore$mean, aes(x = sea$date[577:612], y = mlp_fore$mean, colour = 'mlp prediction'))+
+  ggtitle("Sea Level+Population+Energy+Ice+Microwaves") +
+  xlab("Year") + ylab("GMSL.Variation.GIA")
+gn2
+
+gn2.1 <- ggplot() +
+  geom_line(data = data.frame(sea$GMSL.variation.GIA[577:612]), aes(x = sea$date[577:612], y = sea$GMSL.variation.GIA[577:612]))+
+  geom_line(data = mlp_fore$mean, aes(x = sea$date[577:612], y = mlp_fore$mean, colour = 'mlp prediction'))+
+  ggtitle("MLP 2: Sea Level+Population+Energy+Ice+Microwaves") +
+  xlab("Year") + ylab("GMSL.Variation.GIA")
+gn2.1
+```
+
+```{r}
+#nn2 forecast to 2025 #data ends at 2008, so 17 years ahead
+fit.mlp = mlp(ts(lim_sea, start = (1993), frequency = 36), reps = 5, comb = "mean", allow.det.season = FALSE, lags = c(1:20), df_mv1[2:5]) 
+fit.mlp
+plot(fit.mlp)
+
+mlp_fore = forecast(fit.mlp, h = 576, bootstrap = TRUE)
+#use for comparison/conclusion page for varying effects of different possibly useful models and its implications for [things connected to the sea]
+```
+```{r}
+#plot 17 year jump with mlp predictions
+future_years = seq(2020, 2024.99, (1/36)) #dates to extend x axis
+
+gnlong <- ggplot() +
+  geom_line(data = data.frame(sea$GMSL.variation.GIA[1:576]), aes(x = sea$date[1:576], y = sea$GMSL.variation.GIA[1:576]))+
+  geom_line(data = mlp_fore$mean, aes(x = seq(2009, 2024.99, (1/36)), y = mlp_fore$mean, colour = 'mlp prediction'))+
+  ggtitle("Sea Level+Population+Energy+Ice+Microwaves") +
+  xlab("Year") + ylab("GMSL.Variation.GIA")
+gnlong
+
+
+#ggplot()+
+#  geom_line(data = data.frame(append(sea$GMSL.variation.GIA, future_years)), aes(x = #append(sea$date, future_years), y = append(sea$GMSL.variation.GIA, rep(NA, 180))))+
+#  geom_line(data = data.frame(mlp_fore$mean), aes(x = seq(2009, 2024.99, (1/36)), y = #mlp_fore$mean), color = "steelblue")+
+#  ggtitle("MLP 2 Forecast to 2025") + xlab("Year") + ylab("GMSL Variation w/GIA")
+
+```
+
+```{r}
+tic()
+#rolling ase for nn2 #hmm actually this is more of generating a new model for each step of the data, not really rolling
+trainingSize = 36
+horizon = 36
+step = 18 #how far to advance each ase window
+ASEHolder = numeric()
+maindata = lim_sea
+
+for( i in 1:(floor(length(maindata)/step)-3))
+{
+  wstart = ((i-1) * step)  +1
+  small_mlp = mlp(ts(maindata[wstart:(wstart + trainingSize -1)]), reps = 25, comb = "mean")
+  forecasts = forecast(small_mlp, h = 36)
+  ASE = mean((maindata[(wstart + trainingSize):(wstart + trainingSize + horizon-1)] - forecasts$mean)^2)
+  ASEHolder[i] = ASE
+  
+  #vizualize each loop
+  loopcount <- paste("Window Range:", sea$date[wstart], ":", sea$date[(wstart + trainingSize + horizon-1)])
+  ase_title <- paste("Windowed ASE:", ASE)
+ggloop <- ggplot()+ #realdata line
+  geom_line(data = data.frame(maindata[wstart:(wstart + trainingSize + horizon-1)]),
+            aes(x = sea$date[wstart:(wstart + trainingSize + horizon-1)], 
+                y = maindata[wstart:(wstart + trainingSize + horizon-1)])) +
+  geom_line(data = data.frame(forecasts), #predictions
+            aes(x = sea$date[(wstart + trainingSize):(wstart + trainingSize + horizon-1)]),
+            y = forecasts$mean, col = "blue") +
+  ggtitle(loopcount, subtitle = ase_title) +
+  xlab("Date Window") +
+  ylab("Sea Level Variation compared to 1996:2016 mean")
+
+g_file <- paste("PsudeoRoll_NN_2_", i, ".png", sep = "") #file name to export
+ggsave(path = 'D:/SMU/DS 6373 Time Series', filename = g_file) #save location
+
+print(ggloop)
+  }
+
+ASEHolder
+hist(ASEHolder)
+WindowedASE = mean(ASEHolder)
+summary(ASEHolder)
+WindowedASE
+roll.nn.ase2 = WindowedASE
+toc()
+```
+```{r}
+#mlp3
+#forecast 1993:2005 out to 2011
+tic()
+fit.mlp = mlp(ts(sea$GMSL.variation.GIA[1:432], start = (1993), frequency = 36), difforder= NULL, reps = 60, outplot = TRUE, comb = "mean",df_mv1[2:5]) 
+fit.mlp
+plot(fit.mlp)
+
+fore.mlp <- forecast(fit.mlp, h = 216)
+
+ASE = mean((sea$GMSL.variation.GIA[433:648] - fore.mlp$mean)^2)
+paste("ASE for NN3: 5 year forecast", ASE)
+toc()
+```
+
+```{r}
+gn3 <- ggplot() +
+  geom_line(data = data.frame(sea$GMSL.variation.GIA[433:648]), aes(x = sea$date[433:648], y = sea$GMSL.variation.GIA[433:648]))+
+  geom_line(data = data.frame(fore.mlp$mean), aes(x = sea$date[433:648], y = fore.mlp$mean, colour = 'mlp prediction'))+
+  ggtitle("6 Year Forecast with Additional Variables") + xlab("Year") + ylab("GMSL")
+gn3
+```
+long term, this nn model seems to do well for the first 3 years, then takes big dive. 
+
+#Section D: Ensemble Model
+(just take average of two prediction methods????) 
+
+```{r}
+#VAR5 + MLP2
+en1_pred <- (pred5$fcst$lim_sea[1:36]+ mlp2_pred)/2
+
+trange = 577:612
+
+ASE = mean((sea$GMSL.variation.GIA[trange] - en1_pred)^2)
+en_ase <- ASE
+ase_sub_title <- paste("1 Year Endpoint ASE: ", ASE, sep = "")
+
+gge1 <- ggplot() +
+  geom_line(data = data.frame(sea$GMSL.variation.GIA[trange]), aes(x = sea$date[trange], y = sea$GMSL.variation.GIA[trange]))+
+  geom_line(data = mlp_fore$mean, aes(x = sea$date[trange], y = pred5$fcst$lim_sea[1:36], color = 'VAR'))+
+  geom_line(data = mlp_fore$mean, aes(x = sea$date[trange], y = mlp2_pred, color = 'MLP'))+
+  geom_line(data = mlp_fore$mean, aes(x = sea$date[trange], y = en1_pred, color = 'Ensemble'))+
+  ggtitle("Ensemble Model: MLP + VAR") +
+  labs(subtitle = ase_sub_title) + 
+  xlab("Year") + ylab("GMSL.Variation.GIA")
+gge1
+
+
+
+#"ASE for NN2 with XREG:  9.74172419797831"
+#"VAR 5 ASE = 18.79541" 
+
+```
+
+#Conclusions
+(add a note here how variable the responses are will the addition of different explanatory variables)
+
+```{r}
+#ase so far
+rounding <- 4
+model.names = c("ARMA(5, 2)", "ARMA(10, 1)", "ARUMA(9, 18, 2)", "VAR1", "VAR2", "VAR2.1", "VAR2.2", "VAR3", "VAR4", "VAR5", "NN: MLP 1", "NN: MLP 2", "Ensemble")
+model.formula = c("(1-1.3076B+0.6804B^2-0.2824B^3-0.0912B^4+0.1021B^5)(Xt-6.24) = (1-0.695B+0.302B^2)*at, var = 7.02", "(1-1.6147B+0.5261B^2-0.0574B^3-0.0199B^4+0.1776B^5+0.0142B^6+0.074B^7-0.1675B^8+0.1675B^9-0.1061B^10)(Xt-6.24) = (1-0.9299B)*at, , var = 7.02", 
+"(1+0.97131823B  -0.39644095B^2  -0.99482457B^3  -0.51328710B^4 -0.36371220B^5  -0.03509629B^6 +0.18712053B^7 +0.11120737B^8 +0.04004108B^9)(1-B^18) = (1+1.6969149B + 0.9308516B^2)*at, var= 6.983474", "GMSL", "GMSL + Energy", "GMSL + Ice", "GMSL + Microwaves", "GMSL + Energy + Population", "GMSL + Energy + Population + Ice", "GMSL + Energy + Population + Ice + Microwaves", 
+"GMSL", "GMSL + Energy + Population + Ice + Microwaves", "(VAR5 + MLP2)/2")
+m.aic = c(round(c(m1.aic[1, 3], m2.aic[1, 3], m3$aic, v1_aic, v2_aic, v2.1_aic, v2.2_aic, v3_aic, v4_aic, v5_aic), digits = rounding), "N/A", "N/A", "N/A")
+m.bic = c(round(c(m1$bic, m2$bic, m3$bic), digits = rounding), "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A")
+endpoint.ase = c(ase1, ase2, ase3, var_ase1, var_ase2, var_ase2.1, var_ase2.2, var_ase3, var_ase4, var_ase5, nn_ase1, nn_ase2, en_ase)
+rolling.ase = c(round(c(roll.ase1, roll.ase2, roll.ase3), digits = rounding), "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", round(c(roll.nn.ase1, roll.nn.ase2), digits = rounding), "N/A")
+
+t1 = data.frame(row.names = model.names)
+t1$formula = model.formula
+t1$aic = m.aic
+t1$bic = m.bic
+t1$endpoint.ase = round(endpoint.ase, digits = rounding)
+t1$rolling.ase = rolling.ase
+
+t1 %>% 
+  kable() %>%
+  kable_styling(bootstrap_options = c("striped"))
+
+```
+The stationary models 1 and 2 performed rather well, considering that they both immediately went to the percieved mean. 
+
